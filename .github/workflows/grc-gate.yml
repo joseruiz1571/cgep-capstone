@@ -1,0 +1,146 @@
+name: GRC Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+  actions: read
+
+env:
+  TF_VERSION: "1.7.5"
+  OPA_VERSION: "v0.62.0"
+  CONFTEST_VERSION: "v0.50.0"
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  grc-gate:
+    name: GRC Policy Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Install OPA + Conftest
+        run: |
+          curl -sL -o /usr/local/bin/opa \
+            "https://openpolicyagent.org/downloads/${OPA_VERSION}/opa_linux_amd64_static"
+          chmod +x /usr/local/bin/opa
+          opa version
+
+          curl -sL "https://github.com/open-policy-agent/conftest/releases/download/${CONFTEST_VERSION}/conftest_${CONFTEST_VERSION#v}_Linux_x86_64.tar.gz" \
+            | tar xz -C /usr/local/bin
+          conftest --version
+
+      # Step 1: Terraform Plan
+      - name: "Step 1 | Terraform Init + Plan"
+        id: plan
+        working-directory: terraform
+        run: |
+          terraform init -input=false
+          terraform plan -out=tfplan.binary -lock=false -input=false
+          terraform show -json tfplan.binary > tfplan.json
+
+      # Step 2: OPA Policy Gate
+      # Pipeline fails CLOSED on any policy violation — PRs are blocked here
+      - name: "Step 2 | OPA Unit Tests (opa test)"
+        run: |
+          opa test ./policies -v
+
+      - name: "Step 2 | Conftest Policy Gate (terraform plan)"
+        run: |
+          # --all-namespaces is REQUIRED: policies use acme.* not main namespace
+          conftest test terraform/tfplan.json \
+            --policy policies/ \
+            --output table \
+            --no-color \
+            --all-namespaces
+
+      # Step 3: Terraform Apply (main only)
+      - name: "Step 3 | Terraform Apply"
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        working-directory: terraform
+        run: |
+          # Do NOT add -auto-approve when passing a plan file — the
+          # setup-terraform wrapper rejects it as a second positional arg.
+          terraform apply tfplan.binary
+          mkdir -p ../evidence
+          terraform output -json > ../evidence/terraform-outputs.json
+
+      # Step 4: Build + Sign Evidence Bundle
+      - name: "Step 4 | Assemble Evidence Bundle"
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          mkdir -p evidence
+          cp terraform/tfplan.json evidence/terraform-plan.json
+          cat > evidence/metadata.json << METAEOF
+          {
+            "run_id":    "${{ github.run_id }}",
+            "sha":       "${{ github.sha }}",
+            "ref":       "${{ github.ref }}",
+            "actor":     "${{ github.actor }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "framework": "CMMC Level 2 / NIST SP 800-171 Rev. 2"
+          }
+          METAEOF
+          opa test ./policies -v 2>&1 > evidence/opa-test-results.txt
+          tar -czf evidence-bundle.tar.gz evidence/
+          sha256sum evidence-bundle.tar.gz | tee evidence-bundle.tar.gz.sha256
+
+      - name: "Step 4 | Install Cosign"
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: sigstore/cosign-installer@v3
+
+      - name: "Step 4 | Sign Evidence Bundle (Keyless / OIDC)"
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          cosign sign-blob evidence-bundle.tar.gz \
+            --bundle evidence-bundle.bundle.json \
+            --yes
+          cosign verify-blob evidence-bundle.tar.gz \
+            --bundle evidence-bundle.bundle.json \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
+      # Step 5: Upload to Evidence Vault
+      - name: "Step 5 | Upload Signed Bundle to Evidence Vault"
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          EVIDENCE_BUCKET: ${{ vars.EVIDENCE_BUCKET }}
+        run: |
+          SHORT_SHA="${{ github.sha }}"
+          SHORT_SHA="${SHORT_SHA:0:8}"
+          PREFIX="evidence/${{ github.run_id }}/${SHORT_SHA}"
+
+          aws s3 cp evidence-bundle.tar.gz       "s3://${EVIDENCE_BUCKET}/${PREFIX}/evidence-bundle.tar.gz"
+          aws s3 cp evidence-bundle.tar.gz.sha256 "s3://${EVIDENCE_BUCKET}/${PREFIX}/evidence-bundle.tar.gz.sha256"
+          aws s3 cp evidence-bundle.bundle.json   "s3://${EVIDENCE_BUCKET}/${PREFIX}/evidence-bundle.bundle.json"
+
+          # Verify Object Lock
+          aws s3api head-object \
+            --bucket "${EVIDENCE_BUCKET}" \
+            --key "${PREFIX}/evidence-bundle.tar.gz" \
+            --query '{ObjectLockMode: ObjectLockMode, RetainUntil: ObjectLockRetainUntilDate}' \
+            --output table
+
+          # Verify SHA-256
+          aws s3 cp "s3://${EVIDENCE_BUCKET}/${PREFIX}/evidence-bundle.tar.gz" /tmp/verify-bundle.tar.gz
+          sha256sum /tmp/verify-bundle.tar.gz
+          cat evidence-bundle.tar.gz.sha256

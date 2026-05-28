@@ -1,0 +1,132 @@
+{
+  "component-definition": {
+    "uuid": "ca5cc1d8-f185-4d2b-ae4f-685d479c75a2",
+    "metadata": {
+      "title": "Acme Health Patient Intake API — GRC Component Definition",
+      "last-modified": "2026-05-25T00:00:00Z",
+      "version": "1.0.0",
+      "oscal-version": "1.1.2",
+      "remarks": "CMMC Level 2 (NIST SP 800-171 Rev. 2) primary. HIPAA and SOC 2 cross-walk as props.",
+      "parties": [{
+        "uuid": "611e84f1-77b2-4b79-b9c6-f96fea991dac",
+        "type": "organization",
+        "name": "Acme Health"
+      }]
+    },
+    "components": [{
+      "uuid": "384c19e1-4af5-445c-a90a-07d1bd8fa243",
+      "type": "software",
+      "title": "Patient Intake API",
+      "description": "AWS serverless patient intake: API Gateway HTTP API → Lambda (Python 3.12) → DynamoDB + S3. Processes PHI submissions.",
+      "control-implementations": [{
+        "uuid": "9bfe0152-85af-44ad-955b-deb8c34ad731",
+        "source": "https://raw.githubusercontent.com/usnistgov/oscal-content/master/nist.gov/SP800-171/rev2/json/NIST_SP-800-171_rev2_catalog.json",
+        "description": "CMMC Level 2 implementations. Each requirement references Terraform resources and links to signed evidence bundles.",
+        "implemented-requirements": [
+          {
+            "uuid": "3462ab90-994a-4595-b045-18fa223ab318",
+            "control-id": "3.13.16",
+            "description": "GAP-01 + GAP-02: S3 and DynamoDB encrypt PHI at rest using customer-managed KMS key (aws_kms_key.cmk, rotation enabled).",
+            "props": [
+              {"name": "terraform-resource", "value": "aws_kms_key.cmk", "remarks": "CMK, rotation enabled, 30-day deletion window"},
+              {"name": "terraform-resource", "value": "aws_s3_bucket_server_side_encryption_configuration.uploads", "remarks": "SSE-KMS with CMK (GAP-01)"},
+              {"name": "terraform-resource", "value": "aws_dynamodb_table.intake (hardening_override.tf)", "remarks": "SSE with CMK (GAP-02)"},
+              {"name": "hipaa-cross", "value": "164.312(a)(2)(iv)"},
+              {"name": "soc2-cross", "value": "CC6.1"},
+              {"name": "gap-closed", "value": "GAP-01 GAP-02"},
+              {"name": "implementation-status", "value": "implemented"}
+            ],
+            "links": [{"href": "#evidence-bundle-resource", "rel": "evidence"}]
+          },
+          {
+            "uuid": "d8b66e5d-6e06-4e17-b693-a214794b6585",
+            "control-id": "3.13.8",
+            "description": "GAP-03: S3 uploads bucket denies all non-TLS requests via bucket policy (aws:SecureTransport=false). OPA policy ACME-S3-002 detects regressions.",
+            "props": [
+              {"name": "terraform-resource", "value": "aws_s3_bucket_policy.uploads_tls", "remarks": "Deny s3:* where SecureTransport=false (GAP-03)"},
+              {"name": "opa-policy", "value": "policies/s3_tls_only.rego"},
+              {"name": "hipaa-cross", "value": "164.312(e)(1)"},
+              {"name": "soc2-cross", "value": "CC6.7"},
+              {"name": "gap-closed", "value": "GAP-03"},
+              {"name": "implementation-status", "value": "implemented"}
+            ],
+            "links": [{"href": "#evidence-bundle-resource", "rel": "evidence"}]
+          },
+          {
+            "uuid": "6c0b8659-99c9-4711-a0a4-16e30ca0facc",
+            "control-id": "3.8.9",
+            "description": "GAP-04: S3 versioning prevents irreversible PHI overwrites. Evidence vault uses Object Lock GOVERNANCE mode (365-day retention) for WORM protection.",
+            "props": [
+              {"name": "terraform-resource", "value": "aws_s3_bucket_versioning.uploads", "remarks": "Versioning enabled (GAP-04)"},
+              {"name": "terraform-resource", "value": "aws_s3_bucket_object_lock_configuration.evidence", "remarks": "GOVERNANCE mode, 365-day retention"},
+              {"name": "hipaa-cross", "value": "164.308(a)(7)"},
+              {"name": "soc2-cross", "value": "A1.2"},
+              {"name": "gap-closed", "value": "GAP-04"},
+              {"name": "implementation-status", "value": "implemented"}
+            ],
+            "links": [{"href": "#evidence-bundle-resource", "rel": "evidence"}]
+          },
+          {
+            "uuid": "29848c1e-99ab-4544-877c-72f0cf6e222a",
+            "control-id": "3.13.1",
+            "description": "GAP-05 + GAP-08: Lambda placed in private VPC subnets with dedicated security group. WAF WebACL with AWS Common Rules + IP rate limit (500/5min). API Gateway throttle: 50 req/s, burst 100.",
+            "props": [
+              {"name": "terraform-resource", "value": "aws_security_group.lambda", "remarks": "No inbound, HTTPS-only egress (GAP-05)"},
+              {"name": "terraform-resource", "value": "aws_lambda_function.intake (hardening_override.tf)", "remarks": "VPC config: private subnets + SG (GAP-05)"},
+              {"name": "terraform-resource", "value": "aws_wafv2_web_acl.intake", "remarks": "WAF: Common Rule Set + rate limit (GAP-08)"},
+              {"name": "hipaa-cross", "value": "164.312(e)(1)"},
+              {"name": "soc2-cross", "value": "CC6.6"},
+              {"name": "gap-closed", "value": "GAP-05 GAP-08"},
+              {"name": "implementation-status", "value": "implemented"}
+            ],
+            "links": [{"href": "#evidence-bundle-resource", "rel": "evidence"}]
+          },
+          {
+            "uuid": "d173798d-ca49-42d2-8d1c-d542764b57cf",
+            "control-id": "3.3.1",
+            "description": "GAP-06 + GAP-08: CloudTrail multi-region trail captures all management + S3/Lambda data events with log validation. API Gateway access logs to CloudWatch (365-day, CMK-encrypted). Lambda DLQ retains failed invocations 14 days. X-Ray active tracing.",
+            "props": [
+              {"name": "terraform-resource", "value": "aws_cloudtrail.main", "remarks": "Multi-region, validation, KMS-encrypted"},
+              {"name": "terraform-resource", "value": "aws_cloudwatch_log_group.apigw", "remarks": "API GW access logs, 365-day (GAP-08)"},
+              {"name": "terraform-resource", "value": "aws_sqs_queue.lambda_dlq", "remarks": "DLQ 14-day retention (GAP-06)"},
+              {"name": "opa-policy", "value": "policies/cloudtrail_enabled.rego"},
+              {"name": "hipaa-cross", "value": "164.312(b)"},
+              {"name": "soc2-cross", "value": "CC7.2"},
+              {"name": "gap-closed", "value": "GAP-06 GAP-08"},
+              {"name": "implementation-status", "value": "implemented"}
+            ],
+            "links": [{"href": "#evidence-bundle-resource", "rel": "evidence"}]
+          },
+          {
+            "uuid": "ee99e40c-e3f4-474b-baf4-f45a576d26b7",
+            "control-id": "3.1.5",
+            "description": "GAP-07: Lambda IAM policy scoped from dynamodb:*/s3:* wildcards to exact actions needed: DynamoDB(PutItem,GetItem,UpdateItem,Query), S3(PutObject,GetObject /uploads/* only), KMS(Decrypt,GenerateDataKey), SQS(SendMessage). OPA policy ACME-IAM-001 blocks wildcards at plan time.",
+            "props": [
+              {"name": "terraform-resource", "value": "aws_iam_role_policy.lambda_inline (hardening_override.tf)", "remarks": "Scoped: 4 DDB + 2 S3 + 2 KMS + 1 SQS actions"},
+              {"name": "opa-policy", "value": "policies/iam_least_privilege.rego"},
+              {"name": "hipaa-cross", "value": "164.312(a)(1)"},
+              {"name": "soc2-cross", "value": "CC6.3"},
+              {"name": "gap-closed", "value": "GAP-07"},
+              {"name": "implementation-status", "value": "implemented"}
+            ],
+            "links": [{"href": "#evidence-bundle-resource", "rel": "evidence"}]
+          }
+        ]
+      }]
+    }],
+    "back-matter": {
+      "resources": [
+        {
+          "uuid": "532dec90-bbb8-48ee-941c-5a1235625e76",
+          "title": "NIST SP 800-171 Rev. 2 OSCAL Catalog",
+          "rlinks": [{"href": "https://raw.githubusercontent.com/usnistgov/oscal-content/master/nist.gov/SP800-171/rev2/json/NIST_SP-800-171_rev2_catalog.json"}]
+        },
+        {
+          "uuid": "ce3e063d-abe5-4801-9897-6547e62586c7",
+          "title": "Evidence Bundle — Signed artifact in S3 Object Lock vault",
+          "description": "Cosign-signed tar.gz (Terraform plan, OPA results, metadata). Uploaded to S3 evidence vault on every merge to main. Verify with: cosign verify-blob evidence-bundle.tar.gz --bundle evidence-bundle.bundle.json --certificate-identity-regexp 'https://github.com/joseruiz1571/cgep-capstone' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'"
+        }
+      ]
+    }
+  }
+}
