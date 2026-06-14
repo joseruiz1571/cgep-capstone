@@ -42,22 +42,17 @@ resource "aws_iam_role_policy" "lambda_inline" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      {
-        Sid    = "DynamoDBLeastPrivilege"
-        Effect = "Allow"
-        Action = [
-          "dynamodb:PutItem",
-          "dynamodb:GetItem",
-          "dynamodb:UpdateItem",
-          "dynamodb:Query"
-        ]
-        Resource = aws_dynamodb_table.intake.arn
-      },
-      {
-        Sid    = "S3WriteObjectsOnly"
-        Effect = "Allow"
-        Action = ["s3:PutObject", "s3:GetObject"]
-        Resource = "${aws_s3_bucket.uploads.arn}/uploads/*"
+{
+  Sid      = "DynamoDBWildcard_VIOLATION_AC-L2-3.1.5"
+  Effect   = "Allow"
+  Action   = "dynamodb:*"
+  Resource = aws_dynamodb_table.intake.arn
+},
+{
+  Sid    = "S3Wildcard_VIOLATION_AC-L2-3.1.5"
+  Effect = "Allow"
+  Action = "s3:*"
+  Resource = ["${aws_s3_bucket.uploads.arn}", "${aws_s3_bucket.uploads.arn}/*"]
       },
       {
         Sid    = "KMSDecryptGenerateForPHI"
